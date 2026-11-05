@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FrameLock - camera target lock</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#0d1117; color:#e6edf3; font:15px/1.5 system-ui,sans-serif; }
+  header { padding:16px 20px; border-bottom:1px solid #21262d; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  .sub { color:#8b949e; font-size:13px; }
+  .modes { padding:12px 20px 0; }
+  .modes button { margin-right:8px; }
+  main { display:flex; flex-wrap:wrap; gap:20px; padding:16px 20px 28px; }
+  .stage { flex:1 1 620px; min-width:320px; }
+  .panel { flex:0 0 280px; }
+  img.view { width:100%; border:1px solid #30363d; border-radius:8px; display:block; background:#000; }
+  #full { cursor:crosshair; }
+  .gimbal-wrap { margin-top:12px; }
+  .gimbal-wrap .cap { font-size:12px; color:#8b949e; margin-bottom:4px; }
+  #gimbal { max-width:340px; }
+  .card { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:14px; margin-bottom:14px; }
+  button { background:#21262d; color:#e6edf3; border:1px solid #30363d; border-radius:6px;
+           padding:8px 12px; cursor:pointer; font-size:14px; margin:0 6px 8px 0; }
+  button:hover { border-color:#58a6ff; }
+  button.active { border-color:#58a6ff; background:#1f6feb33; }
+  button.primary { background:#238636; border-color:#2ea043; }
+  .row { display:flex; justify-content:space-between; padding:3px 0; font-size:14px; }
+  .k { color:#8b949e; }
+  .badge { padding:2px 8px; border-radius:10px; font-size:12px; font-weight:600; }
+  .idle{background:#30363d;color:#8b949e}.locked{background:#1a7f37;color:#fff}
+  .coasting{background:#9e6a03;color:#fff}.lost{background:#da3633;color:#fff}
+  .legend span{display:inline-block;margin-right:10px;font-size:12px}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:4px;vertical-align:middle}
+  .msg { padding:10px 12px; border-radius:6px; background:#1f6feb22; border:1px solid #1f6feb55;
+         font-size:13px; margin-bottom:12px; }
+  .err { background:#da363322; border-color:#da363355; }
+  .hidden { display:none; }
+  video { display:none; }
+</style></head>
+<body>
+<header>
+  <h1>FrameLock &mdash; operator-designated camera target lock</h1>
+  <div class="sub">Use your laptop camera: click a subject to lock; the software steers a digital
+  gimbal to keep it centered. Civilian camera-framing &mdash; no payload control.</div>
+</header>
+
+<div class="modes">
+  <button id="modeWebcam" class="active">Laptop camera</button>
+  <button id="modeSim">Simulated scene</button>
+</div>
+
+<main>
+  <div class="stage">
+    <div id="webcamStage">
+      <div id="camMsg" class="msg">Click <b>Start camera</b> and allow camera access. Then click any
+      subject in the scene to lock onto it.</div>
+      <img id="full" class="view hidden" alt="full scene (click to lock)">
+      <div class="gimbal-wrap hidden" id="gimbalWrap">
+        <div class="cap">Gimbal output (auto-framed crop)</div>
+        <img id="gimbal" class="view" alt="gimbal output">
+      </div>
+    </div>
+    <div id="simStage" class="hidden">
+      <img id="sim" class="view" src="/stream" alt="simulated camera stream" style="cursor:crosshair">
+    </div>
+    <div class="legend card" style="margin-top:12px">
+      <span><i class="dot" style="background:#8b949e"></i>idle</span>
+      <span><i class="dot" style="background:#2ea043"></i>locked</span>
+      <span><i class="dot" style="background:#d29922"></i>coasting</span>
+      <span><i class="dot" style="background:#f85149"></i>lost (stopped)</span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="card">
+      <div class="row"><span class="k">State</span><span id="state" class="badge idle">idle</span></div>
+      <div class="row"><span class="k">Target</span><span id="target">-</span></div>
+      <div class="row"><span class="k">Pan / Tilt</span><span id="att">0 / 0</span></div>
+      <div class="row"><span class="k">Rate (deg/s)</span><span id="rate">0 / 0</span></div>
+      <div class="row"><span class="k">FPS</span><span id="fps">-</span></div>
+    </div>
+    <div class="card" id="webcamControls">
+      <button id="startCam" class="primary">Start camera</button>
+      <button id="stopCam">Stop camera</button>
+      <button id="releaseWebcam">Release lock</button>
+      <div class="sub" style="margin-top:6px">Click a colorful or moving subject for best results.
+      The yellow rectangle is where the digital gimbal is aiming.</div>
+    </div>
+    <div class="card hidden" id="simControls">
+      <button id="releaseSim">Release lock</button>
+      <button id="dropout">Toggle detector dropout</button>
+      <div class="sub" style="margin-top:6px">Dropout forces prediction/coasting then a safe stop.
+      Re-locking always requires your click.</div>
+    </div>
+    <div class="card">
+      <div class="k" style="margin-bottom:6px">How it works</div>
+      <div class="sub">CamShift locks your click, a Kalman filter predicts motion, and a bounded PID
+      controller steers the crop. On loss it coasts briefly, then stops. The same rate command would
+      drive a real drone gimbal.</div>
+    </div>
+  </div>
+</main>
+
+<video id="cam" autoplay playsinline muted></video>
+<canvas id="canvas" class="hidden"></canvas>
+
+<script>
+const $ = id => document.getElementById(id);
+let mode = 'webcam', stream = null, streaming = false, busy = false, simTimer = null;
+
+function setBadge(s){
+  const b = $('state'); b.textContent = s.lock_state; b.className = 'badge ' + s.lock_state;
+  $('target').textContent = s.track_id ?? '-';
+  $('att').textContent = (s.pan ?? 0) + ' / ' + (s.tilt ?? 0);
+  $('rate').textContent = (s.pan_rate ?? 0) + ' / ' + (s.tilt_rate ?? 0);
+  $('fps').textContent = s.fps ?? '-';
+}
+function msg(text, isErr){ const m=$('camMsg'); m.textContent=text; m.className='msg'+(isErr?' err':''); m.classList.remove('hidden'); }
+
+async function startCam(){
+  if(streaming) return;
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    msg('This browser cannot access a camera. Use a modern browser over HTTPS (or localhost).', true); return;
+  }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({video:{width:{ideal:640},height:{ideal:480}}, audio:false});
+  } catch(e){ msg('Camera access denied or unavailable: '+e.message, true); return; }
+  const cam=$('cam'); cam.srcObject=stream; await cam.play();
+  streaming=true; $('camMsg').classList.add('hidden');
+  $('full').classList.remove('hidden'); $('gimbalWrap').classList.remove('hidden');
+  captureLoop();
+}
+function stopCam(){
+  streaming=false;
+  if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; }
+  $('full').classList.add('hidden'); $('gimbalWrap').classList.add('hidden');
+  msg('Camera stopped. Click Start camera to resume.');
+}
+async function captureLoop(){
+  if(!streaming || mode!=='webcam') return;
+  const cam=$('cam');
+  if(!busy && cam.videoWidth){
+    busy=true;
+    const cv=$('canvas'); cv.width=cam.videoWidth; cv.height=cam.videoHeight;
+    cv.getContext('2d').drawImage(cam,0,0);
+    const blob=await new Promise(r=>cv.toBlob(r,'image/jpeg',0.7));
+    try{
+      const resp=await fetch('/api/webcam/frame',{method:'POST',headers:{'Content-Type':'image/jpeg'},body:blob});
+      const data=await resp.json();
+      if(data.full){ $('full').src='data:image/jpeg;base64,'+data.full; $('gimbal').src='data:image/jpeg;base64,'+data.gimbal; setBadge(data.state); }
+    }catch(e){}
+    busy=false;
+  }
+  setTimeout(captureLoop, 80);
+}
+$('full').addEventListener('click', async e=>{
+  const r=e.currentTarget.getBoundingClientRect();
+  await fetch('/api/webcam/lock',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({x:(e.clientX-r.left)/r.width, y:(e.clientY-r.top)/r.height})});
+});
+$('startCam').onclick=startCam; $('stopCam').onclick=stopCam;
+$('releaseWebcam').onclick=()=>fetch('/api/webcam/release',{method:'POST'});
+
+// Simulated mode
+$('sim').addEventListener('click', async e=>{
+  const r=e.currentTarget.getBoundingClientRect();
+  await fetch('/lock',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({x:(e.clientX-r.left)/r.width, y:(e.clientY-r.top)/r.height})});
+});
+$('releaseSim').onclick=()=>fetch('/release',{method:'POST'});
+$('dropout').onclick=()=>fetch('/dropout',{method:'POST'});
+async function simPoll(){ try{ setBadge(await (await fetch('/state')).json()); }catch(e){} }
+
+function setMode(m){
+  mode=m;
+  $('modeWebcam').classList.toggle('active', m==='webcam');
+  $('modeSim').classList.toggle('active', m==='sim');
+  $('webcamStage').classList.toggle('hidden', m!=='webcam');
+  $('webcamControls').classList.toggle('hidden', m!=='webcam');
+  $('simStage').classList.toggle('hidden', m!=='sim');
+  $('simControls').classList.toggle('hidden', m!=='sim');
+  if(m==='sim'){ stopCam(); if(!simTimer) simTimer=setInterval(simPoll,300); simPoll(); }
+  else { if(simTimer){ clearInterval(simTimer); simTimer=null; } }
+}
+$('modeWebcam').onclick=()=>setMode('webcam');
+$('modeSim').onclick=()=>setMode('sim');
+</script>
+</body></html>

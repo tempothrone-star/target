@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Generated media artifacts (rendered demos / clips)
+*.mp4
+*.png
+*.jpg
+*.jpeg
+
+# Local secrets
+.env
